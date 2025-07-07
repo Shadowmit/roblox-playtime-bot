@@ -11,7 +11,7 @@ app.use(bodyParser.json());
 
 // Promotion thresholds (in seconds) and corresponding rank IDs
 const promotions = [
-  { seconds: 3600, rankId: 2 },   // 1 hour
+  { seconds: 20, rankId: 2 },   // 1 hour
   { seconds: 7200, rankId: 3 },   // 2 hours
   { seconds: 12600, rankId: 4 },  // 3.5 hours
   { seconds: 21600, rankId: 5 }   // 6 hours
