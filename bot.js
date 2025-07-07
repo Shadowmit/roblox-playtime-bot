@@ -107,25 +107,24 @@ let lastTokenRefresh = 0;
 async function refreshCSRFToken() {
   try {
     const response = await axios.post(
-      "https://auth.roblox.com/v2/logout",
-      {},
-      { 
-        headers: { 
-          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
-          "Content-Type": "application/json"
+      "https://groups.roblox.com/v1/groups/1/users/1", // Dummy request
+      { roleId: 1 },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
         }
       }
     );
-    
-    csrfToken = response.headers["x-csrf-token"];
-    lastTokenRefresh = Date.now();
-    console.log("🔄 Refreshed CSRF token");
-    return true;
   } catch (error) {
-    console.error("❌ Failed to refresh CSRF token:", {
-      status: error.response?.status,
-      error: error.response?.data || error.message
-    });
+    const token = error.response?.headers["x-csrf-token"];
+    if (token) {
+      csrfToken = token;
+      lastTokenRefresh = Date.now();
+      console.log("🔄 Refreshed CSRF token");
+      return true;
+    }
+    console.error("❌ Failed to get CSRF token:", error.response?.data || error.message);
     return false;
   }
 }
