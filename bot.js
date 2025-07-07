@@ -12,10 +12,10 @@ app.use(bodyParser.json());
 
 // Corrected promotion thresholds (in seconds)
 const promotions = [
-  { seconds: 3600, roleId: 116368233 },   // 1 hour
-  { seconds: 7200, roleId: 112856307 },   // 2 hours
-  { seconds: 12600, roleId: 112064304 },  // 3.5 hours
-  { seconds: 21600, roleId: 113240294 }   // 6 hours
+  { seconds: 10, roleId: 116368233 },   // 1 hour
+  { seconds: 20, roleId: 112856307 },   // 2 hours
+  { seconds: 30, roleId: 112064304 },  // 3.5 hours
+  { seconds: 40, roleId: 113240294 }   // 6 hours
 ];
 
 // Persistent promotion tracking
