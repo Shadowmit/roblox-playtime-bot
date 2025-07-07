@@ -212,12 +212,9 @@ async function sendWebhook(userId, roleId, playtime) {
 }
 
 // Start server
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🔗 Group ID: ${process.env.GROUP_ID}`);
-  
-  // Initialize CSRF token on startup
-  await refreshCSRFToken();
+  refreshCSRFToken(); // Don't `await` here, just fire
 });
 
 // Crash prevention
