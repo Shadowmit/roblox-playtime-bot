@@ -1,92 +1,106 @@
-require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
-const fetch = require("node-fetch");
+const dotenv = require("dotenv");
+const axios = require("axios");
+
+dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const API_KEY = process.env.API_KEY;
-const COOKIE = ".ROBLOSECURITY=" + process.env.ROBLOSECURITY;
-const GROUP_ID = process.env.GROUP_ID;
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-
-const PROMOTION_TIERS = [
-  { rankId: 2, seconds: 3600 },     // 1 hour
-  { rankId: 3, seconds: 7200 },     // 2 hours
-  { rankId: 4, seconds: 12600 },    // 3.5 hours
-  { rankId: 5, seconds: 21600 },    // 6 hours
-];
-
-let playtimeData = {};
-
 app.use(bodyParser.json());
 
-app.post("/log-playtime", async (req, res) => {
-  const key = req.headers["x-api-key"];
-  if (key !== API_KEY) return res.status(401).send("Unauthorized");
+// Promotion thresholds (in seconds) and corresponding rank IDs
+const promotions = [
+  { seconds: 3600, rankId: 2 },   // 1 hour
+  { seconds: 7200, rankId: 3 },   // 2 hours
+  { seconds: 12600, rankId: 4 },  // 3.5 hours
+  { seconds: 21600, rankId: 5 }   // 6 hours
+];
 
-  const { userId, playtime } = req.body;
-  if (!userId || !playtime) return res.status(400).send("Invalid payload");
+// Keeps track of promoted users in this session to avoid duplicate promotions
+const promotedUsers = {}; // userId: [rankIds]
 
-  if (!playtimeData[userId]) playtimeData[userId] = 0;
-  playtimeData[userId] += playtime;
-
-  try {
-    const currentRank = await getUserRank(userId);
-
-    for (const tier of PROMOTION_TIERS) {
-      if (
-        playtimeData[userId] >= tier.seconds &&
-        currentRank < tier.rankId
-      ) {
-        await promoteUser(userId, tier.rankId);
-        await logToWebhook(userId, playtimeData[userId], tier.rankId);
-      }
-    }
-
-    res.status(200).send("Playtime logged.");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
-  }
+app.get("/", (req, res) => {
+  res.send("✅ Bot is online!, logged in");
 });
 
-async function getUserRank(userId) {
-  const res = await fetch(`https://groups.roblox.com/v1/users/${userId}/groups`);
-  const data = await res.json();
-  const group = data.data.find(g => g.id == GROUP_ID);
-  return group ? group.role.rank : 0;
-}
+app.post("/log-playtime", async (req, res) => {
+  const apiKey = req.headers["x-api-key"];
+  const { userId, playtime } = req.body;
 
-async function promoteUser(userId, newRank) {
-  await fetch(`https://groups.roblox.com/v1/groups/${GROUP_ID}/users/${userId}`, {
-    method: "PATCH",
-    headers: {
-      Cookie: COOKIE,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ roleId: newRank })
-  });
-}
+  if (apiKey !== process.env.API_KEY) {
+    return res.status(403).json({ error: "Unauthorized" });
+  }
 
-async function logToWebhook(userId, playtimeSeconds, newRank) {
-  const playtimeHours = (playtimeSeconds / 3600).toFixed(2);
-  await fetch(WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      embeds: [
-        {
-          title: `User Promoted`,
-          description: `User ID: **${userId}** was promoted to **Rank ${newRank}** after **${playtimeHours} hours** of playtime.`,
-          color: 3066993,
-          timestamp: new Date().toISOString()
+  if (!userId || !playtime) {
+    return res.status(400).json({ error: "Missing userId or playtime" });
+  }
+
+  console.log(`👤 User ${userId} has ${playtime} seconds`);
+
+  // Promotion logic
+  try {
+    for (const promo of promotions) {
+      if (playtime >= promo.seconds) {
+        const alreadyPromoted = promotedUsers[userId]?.includes(promo.rankId);
+        if (!alreadyPromoted) {
+          const success = await promoteUser(userId, promo.rankId);
+          if (success) {
+            promotedUsers[userId] = promotedUsers[userId] || [];
+            promotedUsers[userId].push(promo.rankId);
+            await sendWebhook(userId, promo.rankId, playtime);
+            console.log(`✅ Promoted user ${userId} to rank ${promo.rankId}`);
+          }
         }
-      ]
-    })
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error during promotion:", err.message);
+    return res.status(500).json({ error: "Promotion failed" });
+  }
+
+  res.json({ success: true, message: "Playtime processed" });
+});
+
+// Promote user in group
+async function promoteUser(userId, newRank) {
+  try {
+    const response = await axios.patch(
+      `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`,
+      { roleId: newRank },
+      {
+        headers: {
+          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    return response.status === 200;
+  } catch (error) {
+    console.error("Promotion failed:", error.response?.data || error.message);
+    return false;
+  }
+}
+
+// Send Discord webhook
+async function sendWebhook(userId, rankId, playtime) {
+  const embed = {
+    title: "🔼 User Promoted",
+    color: 0x00ff00,
+    fields: [
+      { name: "User ID", value: userId.toString(), inline: true },
+      { name: "New Rank", value: rankId.toString(), inline: true },
+      { name: "Playtime", value: `${Math.floor(playtime / 60)} minutes`, inline: true }
+    ],
+    timestamp: new Date().toISOString()
+  };
+
+  await axios.post(process.env.DISCORD_WEBHOOK_URL, {
+    embeds: [embed]
   });
 }
 
+// Start the server
 app.listen(PORT, () => {
-  console.log(`Bot listening on port ${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
