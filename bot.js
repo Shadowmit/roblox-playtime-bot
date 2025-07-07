@@ -2,6 +2,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const dotenv = require("dotenv");
 const axios = require("axios");
+const fs = require("fs");
 
 dotenv.config();
 const app = express();
@@ -11,14 +12,13 @@ app.use(bodyParser.json());
 
 // Corrected promotion thresholds (in seconds)
 const promotions = [
-  { seconds: 20, roleId: 116368233 },   // 1 hour
-  { seconds: 40, roleId: 112856307 },   // 2 hours
-  { seconds: 60, roleId: 112064304 },  // 3.5 hours
-  { seconds: 180, roleId: 113240294 }   // 6 hours
+  { seconds: 10, roleId: 116368233 },   // 1 hour
+  { seconds: 20, roleId: 112856307 },   // 2 hours
+  { seconds: 30, roleId: 112064304 },  // 3.5 hours
+  { seconds: 40, roleId: 113240294 }   // 6 hours
 ];
 
 // Persistent promotion tracking
-const fs = require("fs");
 const LOG_FILE = "promotion-log.json";
 
 // Load existing promotions
@@ -60,18 +60,11 @@ app.post("/log-playtime", async (req, res) => {
   console.log(`👤 User ${userId} | Playtime: ${Math.floor(playtime/60)} minutes`);
 
   try {
-    // Get current rank
-    const currentRank = await getCurrentRank(userId);
-    if (!currentRank) {
-        console.log(`ℹ️ User ${userId} not in group - skipping`);
-        return res.json({ success: true, message: "User not in group" });
-    }
-
     // Check promotions
     for (const promo of promotions) {
-      if (playtime >= promo.seconds && currentRank < promo.roleId) {
+      if (playtime >= promo.seconds) {
         const alreadyPromoted = promotionLog.some(entry => 
-          entry.userId === userId && entry.roleId === promo.roleId
+          entry.userId == userId && entry.roleId == promo.roleId
         );
 
         if (!alreadyPromoted) {
@@ -87,6 +80,8 @@ app.post("/log-playtime", async (req, res) => {
               timestamp: new Date().toISOString()
             });
             fs.writeFileSync(LOG_FILE, JSON.stringify(promotionLog, null, 2));
+          } else {
+            console.log(`❌ Failed to promote ${userId} to ${promo.roleId}`);
           }
         }
       }
@@ -97,20 +92,6 @@ app.post("/log-playtime", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
-
-// Get user's current rank
-async function getCurrentRank(userId) {
-  try {
-    const response = await axios.get(
-      `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`,
-      { headers: { Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}` } }
-    );
-    return response.data.role.id;
-  } catch (err) {
-    console.error("⛔ Rank check failed:", err.response?.data || err.message);
-    return null;
-  }
-}
 
 // Promote user with proper CSRF handling
 async function promoteUser(userId, roleId) {
@@ -158,13 +139,14 @@ async function sendWebhook(userId, roleId, playtime) {
         title: "🔼 Rank Promotion",
         color: 0x00ff00,
         fields: [
-          { name: "User ID", value: userId, inline: true },
-          { name: "New Rank", value: roleId, inline: true },
+          { name: "User ID", value: userId.toString(), inline: true },
+          { name: "New Rank", value: roleId.toString(), inline: true },
           { name: "Playtime", value: `${hours} hours`, inline: true }
         ],
         timestamp: new Date().toISOString()
       }]
     });
+    console.log(`📤 Sent webhook for ${userId}`);
   } catch (err) {
     console.error("❌ Webhook failed:", err.message);
   }
@@ -174,6 +156,7 @@ async function sendWebhook(userId, roleId, playtime) {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🔗 Group ID: ${process.env.GROUP_ID}`);
+  console.log(`🔑 API Key: ${process.env.API_KEY}`);
 });
 
 // Crash prevention
