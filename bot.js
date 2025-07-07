@@ -42,14 +42,14 @@ app.post("/log-playtime", async (req, res) => {
   try {
     for (const promo of promotions) {
       if (playtime >= promo.seconds) {
-        const alreadyPromoted = promotedUsers[userId]?.includes(promo.rankId);
+        const alreadyPromoted = promotedUsers[userId]?.includes(promo.roleId);
         if (!alreadyPromoted) {
-          const success = await promoteUser(userId, promo.rankId);
+          const success = await promoteUser(userId, promo.roleId);
           if (success) {
             promotedUsers[userId] = promotedUsers[userId] || [];
-            promotedUsers[userId].push(promo.rankId);
-            await sendWebhook(userId, promo.rankId, playtime);
-            console.log(`✅ Promoted user ${userId} to rank ${promo.rankId}`);
+            promotedUsers[userId].push(promo.roleId);
+            await sendWebhook(userId, promo.roleId, playtime);
+            console.log(`✅ Promoted user ${userId} to rank ${promo.roleId}`);
           }
         }
       }
@@ -97,13 +97,13 @@ async function promoteUser(userId, newRank) {
 }
 
 // Send Discord webhook
-async function sendWebhook(userId, rankId, playtime) {
+async function sendWebhook(userId, roleId, playtime) {
   const embed = {
     title: "🔼 User Promoted",
     color: 0x00ff00,
     fields: [
       { name: "User ID", value: userId.toString(), inline: true },
-      { name: "New Rank", value: rankId.toString(), inline: true },
+      { name: "New Rank", value: roleId.toString(), inline: true },
       { name: "Playtime", value: `${Math.floor(playtime / 60)} minutes`, inline: true }
     ],
     timestamp: new Date().toISOString()
