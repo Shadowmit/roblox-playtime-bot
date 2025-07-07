@@ -9,112 +9,177 @@ const PORT = process.env.PORT || 3000;
 
 app.use(bodyParser.json());
 
-// Promotion thresholds (in seconds) and corresponding rank IDs
+// Corrected promotion thresholds (in seconds)
 const promotions = [
-  { seconds: 20, roleId: 116368233 },   // 1 hour
-  { seconds: 30, roleId: 112856307 },   // 2 hours
-  { seconds: 40, roleId: 112064304 },  // 3.5 hours
-  { seconds: 90, roleId: 113240294 }   // 6 hours
+  { seconds: 3600, roleId: 116368233 },   // 1 hour
+  { seconds: 7200, roleId: 112856307 },   // 2 hours
+  { seconds: 12600, roleId: 112064304 },  // 3.5 hours
+  { seconds: 21600, roleId: 113240294 }   // 6 hours
 ];
 
-// Keeps track of promoted users in this session to avoid duplicate promotions
-const promotedUsers = {}; // userId: [rankIds]
+// Persistent promotion tracking
+const fs = require("fs");
+const LOG_FILE = "promotion-log.json";
 
-app.get("/", (req, res) => {
-  res.send("✅ Bot is online!, logged in");
-});
+// Load existing promotions
+let promotionLog = [];
+try {
+  promotionLog = JSON.parse(fs.readFileSync(LOG_FILE));
+} catch (err) {
+  console.warn("Creating new promotion log");
+}
+
+// Health monitoring
+let lastRequestTime = Date.now();
+setInterval(() => {
+  if (Date.now() - lastRequestTime > 300000) { // 5 min inactivity
+    console.log("🟡 Sending keep-alive ping");
+    axios.get(`http://localhost:${PORT}/health`).catch(() => {});
+  }
+}, 60000);
+
+app.get("/", (req, res) => res.send("✅ Bot is online"));
+app.get("/health", (req, res) => res.send("👍 OK")); // For Render.com health checks
 
 app.post("/log-playtime", async (req, res) => {
+  lastRequestTime = Date.now();
   const apiKey = req.headers["x-api-key"];
   const { userId, playtime } = req.body;
 
+  // Authorization
   if (apiKey !== process.env.API_KEY) {
+    console.log("❌ Unauthorized request");
     return res.status(403).json({ error: "Unauthorized" });
   }
 
   if (!userId || !playtime) {
-    return res.status(400).json({ error: "Missing userId or playtime" });
+    console.log("❌ Invalid request", { userId, playtime });
+    return res.status(400).json({ error: "Missing parameters" });
   }
 
-  console.log(`👤 User ${userId} has ${playtime} seconds`);
+  console.log(`👤 User ${userId} | Playtime: ${Math.floor(playtime/60)} minutes`);
 
-  // Promotion logic
   try {
+    // Get current rank
+    const currentRank = await getCurrentRank(userId);
+    if (!currentRank) {
+      console.log(`❓ User ${userId} not in group`);
+      return res.json({ success: false, message: "User not in group" });
+    }
+
+    // Check promotions
     for (const promo of promotions) {
-      if (playtime >= promo.seconds) {
-        const alreadyPromoted = promotedUsers[userId]?.includes(promo.roleId);
+      if (playtime >= promo.seconds && currentRank < promo.roleId) {
+        const alreadyPromoted = promotionLog.some(entry => 
+          entry.userId === userId && entry.roleId === promo.roleId
+        );
+
         if (!alreadyPromoted) {
           const success = await promoteUser(userId, promo.roleId);
           if (success) {
-            promotedUsers[userId] = promotedUsers[userId] || [];
-            promotedUsers[userId].push(promo.roleId);
+            console.log(`✅ Promoted ${userId} to ${promo.roleId}`);
             await sendWebhook(userId, promo.roleId, playtime);
-            console.log(`✅ Promoted user ${userId} to rank ${promo.roleId}`);
+            
+            // Update log
+            promotionLog.push({
+              userId,
+              roleId: promo.roleId,
+              timestamp: new Date().toISOString()
+            });
+            fs.writeFileSync(LOG_FILE, JSON.stringify(promotionLog, null, 2));
           }
         }
       }
     }
+    res.json({ success: true });
   } catch (err) {
-    console.error("❌ Error during promotion:", err.message);
-    return res.status(500).json({ error: "Promotion failed" });
+    console.error("🔥 Promotion error:", err);
+    res.status(500).json({ error: "Server error" });
   }
-
-  res.json({ success: true, message: "Playtime processed" });
 });
 
-// Promote user in group
-async function promoteUser(userId, newRank) {
+// Get user's current rank
+async function getCurrentRank(userId) {
   try {
-    const url = `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`;
+    const response = await axios.get(
+      `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`,
+      { headers: { Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}` } }
+    );
+    return response.data.role.id;
+  } catch (err) {
+    console.error("⛔ Rank check failed:", err.response?.data || err.message);
+    return null;
+  }
+}
 
-    // Step 1: Send a fake request to get CSRF token
-    let csrfToken = "";
-    try {
-      await axios.patch(url, { roleId: newRank }, {
-        headers: {
-          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
-        }
-      });
-    } catch (err) {
-      csrfToken = err.response.headers["x-csrf-token"];
-      if (!csrfToken) throw new Error("Failed to fetch CSRF token");
-    }
-
-    // Step 2: Send the actual promotion request with CSRF token
-    const response = await axios.patch(url, { roleId: newRank }, {
+// Promote user with proper CSRF handling
+async function promoteUser(userId, roleId) {
+  const url = `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`;
+  
+  try {
+    // Get CSRF token first
+    const tokenResponse = await axios.post(
+      "https://auth.roblox.com/v2/logout",
+      {},
+      { headers: { Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}` } }
+    );
+    
+    const csrfToken = tokenResponse.headers["x-csrf-token"];
+    
+    // Execute promotion
+    await axios.patch(url, { roleId }, {
       headers: {
-        Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
         "X-CSRF-TOKEN": csrfToken,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
       }
     });
-
-    return response.status === 200;
-  } catch (error) {
-    console.error("Promotion failed:", error.response?.data || error.message);
+    
+    return true;
+  } catch (err) {
+    console.error("🚫 Promotion failed:", {
+      userId,
+      roleId,
+      status: err.response?.status,
+      error: err.response?.data || err.message
+    });
     return false;
   }
 }
 
 // Send Discord webhook
 async function sendWebhook(userId, roleId, playtime) {
-  const embed = {
-    title: "🔼 User Promoted",
-    color: 0x00ff00,
-    fields: [
-      { name: "User ID", value: userId.toString(), inline: true },
-      { name: "New Rank", value: roleId.toString(), inline: true },
-      { name: "Playtime", value: `${Math.floor(playtime / 60)} minutes`, inline: true }
-    ],
-    timestamp: new Date().toISOString()
-  };
-
-  await axios.post(process.env.DISCORD_WEBHOOK_URL, {
-    embeds: [embed]
-  });
+  if (!process.env.DISCORD_WEBHOOK) return;
+  
+  try {
+    const hours = (playtime / 3600).toFixed(1);
+    await axios.post(process.env.DISCORD_WEBHOOK, {
+      embeds: [{
+        title: "🔼 Rank Promotion",
+        color: 0x00ff00,
+        fields: [
+          { name: "User ID", value: userId, inline: true },
+          { name: "New Rank", value: roleId, inline: true },
+          { name: "Playtime", value: `${hours} hours`, inline: true }
+        ],
+        timestamp: new Date().toISOString()
+      }]
+    });
+  } catch (err) {
+    console.error("❌ Webhook failed:", err.message);
+  }
 }
 
-// Start the server
+// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🔗 Group ID: ${process.env.GROUP_ID}`);
+});
+
+// Crash prevention
+process.on("uncaughtException", (err) => {
+  console.error("💥 Critical Error:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("⚠️ Unhandled Rejection:", err);
 });
