@@ -12,10 +12,10 @@ app.use(bodyParser.json());
 
 // Corrected promotion thresholds (in seconds)
 const promotions = [
-  { seconds: 10, roleId: 116368233 },   // 1 hour
-  { seconds: 20, roleId: 112856307 },   // 2 hours
-  { seconds: 30, roleId: 112064304 },  // 3.5 hours
-  { seconds: 40, roleId: 113240294 }   // 6 hours
+  { seconds: 3600, roleId: 116368233 },   // 1 hour
+  { seconds: 7200, roleId: 112856307 },   // 2 hours
+  { seconds: 12600, roleId: 112064304 },  // 3.5 hours
+  { seconds: 21600, roleId: 113240294 }   // 6 hours
 ];
 
 // Persistent promotion tracking
@@ -27,6 +27,7 @@ try {
   promotionLog = JSON.parse(fs.readFileSync(LOG_FILE));
 } catch (err) {
   console.warn("Creating new promotion log");
+  promotionLog = [];
 }
 
 // Health monitoring
@@ -39,18 +40,23 @@ setInterval(() => {
 }, 60000);
 
 app.get("/", (req, res) => res.send("✅ Bot is online"));
-app.get("/health", (req, res) => res.send("👍 OK")); // For Render.com health checks
+app.get("/health", (req, res) => res.send("👍 OK"));
+
+// Middleware to validate API key
+app.use((req, res, next) => {
+  if (req.path === "/") return next();
+  
+  const apiKey = req.headers["x-api-key"];
+  if (apiKey !== process.env.API_KEY) {
+    console.log(`❌ Unauthorized request from ${req.ip}`);
+    return res.status(403).json({ error: "Unauthorized" });
+  }
+  next();
+});
 
 app.post("/log-playtime", async (req, res) => {
   lastRequestTime = Date.now();
-  const apiKey = req.headers["x-api-key"];
   const { userId, playtime } = req.body;
-
-  // Authorization
-  if (apiKey !== process.env.API_KEY) {
-    console.log("❌ Unauthorized request");
-    return res.status(403).json({ error: "Unauthorized" });
-  }
 
   if (!userId || !playtime) {
     console.log("❌ Invalid request", { userId, playtime });
@@ -93,22 +99,50 @@ app.post("/log-playtime", async (req, res) => {
   }
 });
 
+// Fixed CSRF token handling
+let csrfToken = "";
+let lastTokenRefresh = 0;
+
+// Get CSRF token from Roblox
+async function refreshCSRFToken() {
+  try {
+    const response = await axios.post(
+      "https://auth.roblox.com/v2/logout",
+      {},
+      { 
+        headers: { 
+          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    
+    csrfToken = response.headers["x-csrf-token"];
+    lastTokenRefresh = Date.now();
+    console.log("🔄 Refreshed CSRF token");
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to refresh CSRF token:", {
+      status: error.response?.status,
+      error: error.response?.data || error.message
+    });
+    return false;
+  }
+}
+
 // Promote user with proper CSRF handling
 async function promoteUser(userId, roleId) {
   const url = `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`;
   
   try {
-    // Get CSRF token first
-    const tokenResponse = await axios.post(
-      "https://auth.roblox.com/v2/logout",
-      {},
-      { headers: { Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}` } }
-    );
-    
-    const csrfToken = tokenResponse.headers["x-csrf-token"];
+    // Refresh token if needed
+    if (!csrfToken || Date.now() - lastTokenRefresh > 300000) { // 5 minutes
+      const refreshed = await refreshCSRFToken();
+      if (!refreshed) return false;
+    }
     
     // Execute promotion
-    await axios.patch(url, { roleId }, {
+    const response = await axios.patch(url, { roleId }, {
       headers: {
         "X-CSRF-TOKEN": csrfToken,
         "Content-Type": "application/json",
@@ -116,13 +150,39 @@ async function promoteUser(userId, roleId) {
       }
     });
     
-    return true;
-  } catch (err) {
+    return response.status === 200;
+  } catch (error) {
+    // Handle token expiration
+    if (error.response?.status === 403 && error.response?.data?.errors?.[0]?.code === 0) {
+      console.log("🔄 Token expired, refreshing...");
+      const refreshed = await refreshCSRFToken();
+      if (refreshed) {
+        // Retry once with new token
+        try {
+          const retryResponse = await axios.patch(url, { roleId }, {
+            headers: {
+              "X-CSRF-TOKEN": csrfToken,
+              "Content-Type": "application/json",
+              Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
+            }
+          });
+          return retryResponse.status === 200;
+        } catch (retryError) {
+          console.error("🚫 Promotion failed after retry:", {
+            userId,
+            roleId,
+            status: retryError.response?.status,
+            error: retryError.response?.data || retryError.message
+          });
+        }
+      }
+    }
+    
     console.error("🚫 Promotion failed:", {
       userId,
       roleId,
-      status: err.response?.status,
-      error: err.response?.data || err.message
+      status: error.response?.status,
+      error: error.response?.data || error.message
     });
     return false;
   }
@@ -153,10 +213,12 @@ async function sendWebhook(userId, roleId, playtime) {
 }
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🔗 Group ID: ${process.env.GROUP_ID}`);
-  console.log(`🔑 API Key: ${process.env.API_KEY}`);
+  
+  // Initialize CSRF token on startup
+  await refreshCSRFToken();
 });
 
 // Crash prevention
