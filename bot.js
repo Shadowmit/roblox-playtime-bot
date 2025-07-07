@@ -1,102 +1,92 @@
 require("dotenv").config();
 const express = require("express");
-const noblox = require("noblox.js");
-const fs = require("fs");
-const path = require("path");
+const bodyParser = require("body-parser");
 const fetch = require("node-fetch");
-
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const GROUP_ID = Number(process.env.GROUP_ID);
-const logFilePath = path.join(__dirname, "promotion-log.json");
 
-// Rank thresholds (seconds to rankId)
-const RANKS = [
-  { seconds: 0, rankId: 255 },     // Newcomer
-  { seconds: 3600, rankId: 100 },  // Member
-  { seconds: 7200, rankId: 101 },  // Regular
-  { seconds: 14400, rankId: 102 }, // Veteran
-  { seconds: 28800, rankId: 103 }  // Elite
+const API_KEY = process.env.API_KEY;
+const COOKIE = ".ROBLOSECURITY=" + process.env.ROBLOSECURITY;
+const GROUP_ID = process.env.GROUP_ID;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+
+const PROMOTION_TIERS = [
+  { rankId: 2, seconds: 3600 },     // 1 hour
+  { rankId: 3, seconds: 7200 },     // 2 hours
+  { rankId: 4, seconds: 12600 },    // 3.5 hours
+  { rankId: 5, seconds: 21600 },    // 6 hours
 ];
 
-function getTargetRank(playtime) {
-  let target = RANKS[0].rankId;
-  for (const r of RANKS) {
-    if (playtime >= r.seconds) {
-      target = r.rankId;
+let playtimeData = {};
+
+app.use(bodyParser.json());
+
+app.post("/log-playtime", async (req, res) => {
+  const key = req.headers["x-api-key"];
+  if (key !== API_KEY) return res.status(401).send("Unauthorized");
+
+  const { userId, playtime } = req.body;
+  if (!userId || !playtime) return res.status(400).send("Invalid payload");
+
+  if (!playtimeData[userId]) playtimeData[userId] = 0;
+  playtimeData[userId] += playtime;
+
+  try {
+    const currentRank = await getUserRank(userId);
+
+    for (const tier of PROMOTION_TIERS) {
+      if (
+        playtimeData[userId] >= tier.seconds &&
+        currentRank < tier.rankId
+      ) {
+        await promoteUser(userId, tier.rankId);
+        await logToWebhook(userId, playtimeData[userId], tier.rankId);
+      }
     }
+
+    res.status(200).send("Playtime logged.");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server error");
   }
-  return target;
+});
+
+async function getUserRank(userId) {
+  const res = await fetch(`https://groups.roblox.com/v1/users/${userId}/groups`);
+  const data = await res.json();
+  const group = data.data.find(g => g.id == GROUP_ID);
+  return group ? group.role.rank : 0;
 }
 
-function logPromotion(userId, prevRank, newRank, playtime) {
-  const logs = JSON.parse(fs.readFileSync(logFilePath, "utf8"));
-  logs.push({
-    userId,
-    previousRank: prevRank,
-    newRank: newRank,
-    playtime,
-    timestamp: new Date().toISOString()
+async function promoteUser(userId, newRank) {
+  await fetch(`https://groups.roblox.com/v1/groups/${GROUP_ID}/users/${userId}`, {
+    method: "PATCH",
+    headers: {
+      Cookie: COOKIE,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ roleId: newRank })
   });
-  fs.writeFileSync(logFilePath, JSON.stringify(logs, null, 2));
 }
 
-async function sendWebhook(userId, previousRank, newRank, playtime) {
-  const data = {
-    embeds: [{
-      title: "🎉 User Promoted",
-      color: 0x00ff00,
-      fields: [
-        { name: "UserId", value: userId.toString(), inline: true },
-        { name: "Previous Rank", value: previousRank.toString(), inline: true },
-        { name: "New Rank", value: newRank.toString(), inline: true },
-        { name: "Playtime (hrs)", value: (playtime / 3600).toFixed(2), inline: true }
-      ],
-      timestamp: new Date().toISOString()
-    }]
-  };
-
-  await fetch(process.env.DISCORD_WEBHOOK, {
+async function logToWebhook(userId, playtimeSeconds, newRank) {
+  const playtimeHours = (playtimeSeconds / 3600).toFixed(2);
+  await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data)
+    body: JSON.stringify({
+      embeds: [
+        {
+          title: `User Promoted`,
+          description: `User ID: **${userId}** was promoted to **Rank ${newRank}** after **${playtimeHours} hours** of playtime.`,
+          color: 3066993,
+          timestamp: new Date().toISOString()
+        }
+      ]
+    })
   });
 }
 
-// AUTH & STARTUP
-(async () => {
-  await noblox.setCookie(process.env.ROBLOX_COOKIE);
-  const botUser = await noblox.getCurrentUser();
-  console.log(`🤖 Logged in as ${botUser.UserName}`);
-
-  app.post("/playtime", async (req, res) => {
-    if (req.headers["x-api-key"] !== process.env.API_KEY) {
-      return res.status(403).send("Forbidden");
-    }
-
-    const { userId, playtime } = req.body;
-    if (!userId || !playtime) return res.status(400).send("Missing userId or playtime");
-
-    try {
-      const currentRank = await noblox.getRankInGroup(GROUP_ID, userId);
-      const targetRank = getTargetRank(playtime);
-
-      if (targetRank > currentRank) {
-        await noblox.setRank(GROUP_ID, userId, targetRank);
-        logPromotion(userId, currentRank, targetRank, playtime);
-        await sendWebhook(userId, currentRank, targetRank, playtime);
-        res.send("✅ Promoted");
-      } else {
-        res.send("ℹ️ No promotion needed");
-      }
-    } catch (err) {
-      console.error("❌ Error:", err);
-      res.status(500).send("Server error");
-    }
-  });
-
-  app.listen(PORT, () => console.log(`🚀 Bot listening on port ${PORT}`));
-})();
-         
+app.listen(PORT, () => {
+  console.log(`Bot listening on port ${PORT}`);
+});
