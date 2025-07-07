@@ -12,9 +12,9 @@ app.use(bodyParser.json());
 // Promotion thresholds (in seconds) and corresponding rank IDs
 const promotions = [
   { seconds: 20, roleId: 116368233 },   // 1 hour
-  { seconds: 7200, roleId: 112856307 },   // 2 hours
-  { seconds: 12600, roleId: 112064304 },  // 3.5 hours
-  { seconds: 21600, roleId: 113240294 }   // 6 hours
+  { seconds: 30, roleId: 112856307 },   // 2 hours
+  { seconds: 40, roleId: 112064304 },  // 3.5 hours
+  { seconds: 50, roleId: 113240294 }   // 6 hours
 ];
 
 // Keeps track of promoted users in this session to avoid duplicate promotions
