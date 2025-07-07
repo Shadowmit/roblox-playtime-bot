@@ -65,16 +65,30 @@ app.post("/log-playtime", async (req, res) => {
 // Promote user in group
 async function promoteUser(userId, newRank) {
   try {
-    const response = await axios.patch(
-      `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`,
-      { roleId: newRank },
-      {
+    const url = `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`;
+
+    // Step 1: Send a fake request to get CSRF token
+    let csrfToken = "";
+    try {
+      await axios.patch(url, { roleId: newRank }, {
         headers: {
           Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
-          "Content-Type": "application/json",
-        },
+        }
+      });
+    } catch (err) {
+      csrfToken = err.response.headers["x-csrf-token"];
+      if (!csrfToken) throw new Error("Failed to fetch CSRF token");
+    }
+
+    // Step 2: Send the actual promotion request with CSRF token
+    const response = await axios.patch(url, { roleId: newRank }, {
+      headers: {
+        Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+        "X-CSRF-TOKEN": csrfToken,
+        "Content-Type": "application/json"
       }
-    );
+    });
+
     return response.status === 200;
   } catch (error) {
     console.error("Promotion failed:", error.response?.data || error.message);
