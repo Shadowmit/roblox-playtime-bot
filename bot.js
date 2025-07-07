@@ -3,6 +3,7 @@ const bodyParser = require("body-parser");
 const dotenv = require("dotenv");
 const axios = require("axios");
 const fs = require("fs");
+const noblox = require("noblox.js");
 
 dotenv.config();
 const app = express();
@@ -12,16 +13,14 @@ app.use(bodyParser.json());
 
 // Corrected promotion thresholds (in seconds)
 const promotions = [
-  { seconds: 10, roleId: 116368233 },   // 1 hour
-  { seconds: 20, roleId: 112856307 },   // 2 hours
-  { seconds: 30, roleId: 112064304 },  // 3.5 hours
-  { seconds: 40, roleId: 113240294 }   // 6 hours
+  { seconds: 10, rank: 2 },   // 1 hour
+  { seconds: 20, rank: 3 },   // 2 hours
+  { seconds: 30, rank: 4 },   // 3.5 hours
+  { seconds: 40, rank: 5 }    // 6 hours
 ];
 
-// Persistent promotion tracking
 const LOG_FILE = "promotion-log.json";
 
-// Load existing promotions
 let promotionLog = [];
 try {
   promotionLog = JSON.parse(fs.readFileSync(LOG_FILE));
@@ -30,10 +29,9 @@ try {
   promotionLog = [];
 }
 
-// Health monitoring
 let lastRequestTime = Date.now();
 setInterval(() => {
-  if (Date.now() - lastRequestTime > 300000) { // 5 min inactivity
+  if (Date.now() - lastRequestTime > 300000) {
     console.log("🟡 Sending keep-alive ping");
     axios.get(`http://localhost:${PORT}/health`).catch(() => {});
   }
@@ -42,10 +40,8 @@ setInterval(() => {
 app.get("/", (req, res) => res.send("✅ Bot is online"));
 app.get("/health", (req, res) => res.send("👍 OK"));
 
-// Middleware to validate API key
 app.use((req, res, next) => {
   if (req.path === "/") return next();
-  
   const apiKey = req.headers["x-api-key"];
   if (apiKey !== process.env.API_KEY) {
     console.log(`❌ Unauthorized request from ${req.ip}`);
@@ -66,28 +62,25 @@ app.post("/log-playtime", async (req, res) => {
   console.log(`👤 User ${userId} | Playtime: ${Math.floor(playtime/60)} minutes`);
 
   try {
-    // Check promotions
     for (const promo of promotions) {
       if (playtime >= promo.seconds) {
         const alreadyPromoted = promotionLog.some(entry => 
-          entry.userId == userId && entry.roleId == promo.roleId
+          entry.userId == userId && entry.rank == promo.rank
         );
 
         if (!alreadyPromoted) {
-          const success = await promoteUser(userId, promo.roleId);
+          const success = await promoteUser(userId, promo.rank);
           if (success) {
-            console.log(`✅ Promoted ${userId} to ${promo.roleId}`);
-            await sendWebhook(userId, promo.roleId, playtime);
-            
-            // Update log
+            console.log(`✅ Promoted ${userId} to rank ${promo.rank}`);
+            await sendWebhook(userId, promo.rank, playtime);
             promotionLog.push({
               userId,
-              roleId: promo.roleId,
+              rank: promo.rank,
               timestamp: new Date().toISOString()
             });
             fs.writeFileSync(LOG_FILE, JSON.stringify(promotionLog, null, 2));
           } else {
-            console.log(`❌ Failed to promote ${userId} to ${promo.roleId}`);
+            console.log(`❌ Failed to promote ${userId} to rank ${promo.rank}`);
           }
         }
       }
@@ -99,111 +92,34 @@ app.post("/log-playtime", async (req, res) => {
   }
 });
 
-// Fixed CSRF token handling
-let csrfToken = "";
-let lastTokenRefresh = 0;
-
-// Get CSRF token from Roblox
-async function refreshCSRFToken() {
+async function promoteUser(userId, rank) {
   try {
-    const response = await axios.post(
-      "https://groups.roblox.com/v1/groups/1/users/1", // Dummy request
-      { roleId: 1 },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
-        }
-      }
-    );
+    await noblox.setRank(Number(process.env.GROUP_ID), Number(userId), rank);
+    return true;
   } catch (error) {
-    const token = error.response?.headers["x-csrf-token"];
-    if (token) {
-      csrfToken = token;
-      lastTokenRefresh = Date.now();
-      console.log("🔄 Refreshed CSRF token");
-      return true;
-    }
-    console.error("❌ Failed to get CSRF token:", error.response?.data || error.message);
+    console.error("🚫 Promotion failed:", error);
     return false;
   }
 }
 
-// Promote user with proper CSRF handling
-async function promoteUser(userId, roleId) {
-  const url = `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`;
-  
-  try {
-    // Refresh token if needed
-    if (!csrfToken || Date.now() - lastTokenRefresh > 300000) { // 5 minutes
-      const refreshed = await refreshCSRFToken();
-      if (!refreshed) return false;
-    }
-    
-    // Execute promotion
-    const response = await axios.patch(url, { roleId }, {
-      headers: {
-        "X-CSRF-TOKEN": csrfToken,
-        "Content-Type": "application/json",
-        Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
-      }
-    });
-    
-    return response.status === 200;
-  } catch (error) {
-    // Handle token expiration
-    if (error.response?.status === 403 && error.response?.data?.errors?.[0]?.code === 0) {
-      console.log("🔄 Token expired, refreshing...");
-      const refreshed = await refreshCSRFToken();
-      if (refreshed) {
-        // Retry once with new token
-        try {
-          const retryResponse = await axios.patch(url, { roleId }, {
-            headers: {
-              "X-CSRF-TOKEN": csrfToken,
-              "Content-Type": "application/json",
-              Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
-            }
-          });
-          return retryResponse.status === 200;
-        } catch (retryError) {
-          console.error("🚫 Promotion failed after retry:", {
-            userId,
-            roleId,
-            status: retryError.response?.status,
-            error: retryError.response?.data || retryError.message
-          });
-        }
-      }
-    }
-    
-    console.error("🚫 Promotion failed:", {
-      userId,
-      roleId,
-      status: error.response?.status,
-      error: error.response?.data || error.message
-    });
-    return false;
-  }
-}
-
-// Send Discord webhook
-async function sendWebhook(userId, roleId, playtime) {
+async function sendWebhook(userId, rank, playtime) {
   if (!process.env.DISCORD_WEBHOOK) return;
-  
+
   try {
     const hours = (playtime / 3600).toFixed(1);
     await axios.post(process.env.DISCORD_WEBHOOK, {
-      embeds: [{
-        title: "🔼 Rank Promotion",
-        color: 0x00ff00,
-        fields: [
-          { name: "User ID", value: userId.toString(), inline: true },
-          { name: "New Rank", value: roleId.toString(), inline: true },
-          { name: "Playtime", value: `${hours} hours`, inline: true }
-        ],
-        timestamp: new Date().toISOString()
-      }]
+      embeds: [
+        {
+          title: "🔼 Rank Promotion",
+          color: 0x00ff00,
+          fields: [
+            { name: "User ID", value: userId.toString(), inline: true },
+            { name: "New Rank", value: rank.toString(), inline: true },
+            { name: "Playtime", value: `${hours} hours`, inline: true }
+          ],
+          timestamp: new Date().toISOString()
+        }
+      ]
     });
     console.log(`📤 Sent webhook for ${userId}`);
   } catch (err) {
@@ -211,16 +127,21 @@ async function sendWebhook(userId, roleId, playtime) {
   }
 }
 
-// Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  refreshCSRFToken(); // Don't `await` here, just fire
+  console.log(`🔗 Group ID: ${process.env.GROUP_ID}`);
+  try {
+    await noblox.setCookie(process.env.ROBLOX_COOKIE);
+    console.log("🔐 Logged in to Roblox successfully");
+  } catch (err) {
+    console.error("❌ Failed to login with noblox.js:", err);
+  }
 });
 
-// Crash prevention
 process.on("uncaughtException", (err) => {
   console.error("💥 Critical Error:", err);
 });
+
 process.on("unhandledRejection", (err) => {
   console.error("⚠️ Unhandled Rejection:", err);
 });
