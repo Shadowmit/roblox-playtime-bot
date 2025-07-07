@@ -1,93 +1,120 @@
-require("dotenv").config();
 const express = require("express");
-const noblox = require("noblox.js");
+const bodyParser = require("body-parser");
+const dotenv = require("dotenv");
+const axios = require("axios");
 
+dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const GROUP_ID = Number(process.env.GROUP_ID);
-const COOKIE = process.env.ROBLOX_COOKIE;
+app.use(bodyParser.json());
 
-if (!GROUP_ID || !COOKIE) {
-  console.error("❌ Missing GROUP_ID or ROBLOX_COOKIE in .env");
-  process.exit(1);
-}
-
-const rankConfig = [
-  { hours: 1, rank: 2 },
-  { hours: 2, rank: 3 },
-  { hours: 3.5, rank: 4 },
-  { hours: 6, rank: 5 },
+// Promotion thresholds (in seconds) and corresponding rank IDs
+const promotions = [
+  { seconds: 20, rankId: 2 },   // 1 hour
+  { seconds: 7200, rankId: 3 },   // 2 hours
+  { seconds: 12600, rankId: 4 },  // 3.5 hours
+  { seconds: 21600, rankId: 5 }   // 6 hours
 ];
 
-// Initialize Roblox session
-async function initRoblox() {
-  try {
-    await noblox.setCookie(COOKIE);
-    const currentUser = await noblox.getCurrentUser();
-    console.log(`✅ Logged in as ${currentUser.UserName} (${currentUser.UserID})`);
-  } catch (err) {
-    console.error("❌ Failed to log in to Roblox:", err);
-    process.exit(1);
-  }
-}
+// Keeps track of promoted users in this session to avoid duplicate promotions
+const promotedUsers = {}; // userId: [rankIds]
 
-// Promote function using rank number
-async function promoteUser(userId, newRankNumber) {
+app.get("/", (req, res) => {
+  res.send("✅ Bot is online!, logged in");
+});
+
+app.post("/log-playtime", async (req, res) => {
+  const apiKey = req.headers["x-api-key"];
+  const { userId, playtime } = req.body;
+
+  if (apiKey !== process.env.API_KEY) {
+    return res.status(403).json({ error: "Unauthorized" });
+  }
+
+  if (!userId || !playtime) {
+    return res.status(400).json({ error: "Missing userId or playtime" });
+  }
+
+  console.log(`👤 User ${userId} has ${playtime} seconds`);
+
+  // Promotion logic
   try {
-    const roles = await noblox.getRoles(GROUP_ID);
-    const targetRole = roles.find(r => r.rank === newRankNumber);
-    if (!targetRole) {
-      console.error(`❌ Rank number ${newRankNumber} not found in group roles.`);
-      return false;
+    for (const promo of promotions) {
+      if (playtime >= promo.seconds) {
+        const alreadyPromoted = promotedUsers[userId]?.includes(promo.rankId);
+        if (!alreadyPromoted) {
+          const success = await promoteUser(userId, promo.rankId);
+          if (success) {
+            promotedUsers[userId] = promotedUsers[userId] || [];
+            promotedUsers[userId].push(promo.rankId);
+            await sendWebhook(userId, promo.rankId, playtime);
+            console.log(`✅ Promoted user ${userId} to rank ${promo.rankId}`);
+          }
+        }
+      }
     }
-    await noblox.setRank(GROUP_ID, userId, targetRole.id);
-    console.log(`✅ Promoted user ${userId} to rank ${newRankNumber} (${targetRole.name})`);
-    return true;
+  } catch (err) {
+    console.error("❌ Error during promotion:", err.message);
+    return res.status(500).json({ error: "Promotion failed" });
+  }
+
+  res.json({ success: true, message: "Playtime processed" });
+});
+
+// Promote user in group
+async function promoteUser(userId, newRank) {
+  try {
+    const url = `https://groups.roblox.com/v1/groups/${process.env.GROUP_ID}/users/${userId}`;
+
+    // Step 1: Send a fake request to get CSRF token
+    let csrfToken = "";
+    try {
+      await axios.patch(url, { roleId: newRank }, {
+        headers: {
+          Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+        }
+      });
+    } catch (err) {
+      csrfToken = err.response.headers["x-csrf-token"];
+      if (!csrfToken) throw new Error("Failed to fetch CSRF token");
+    }
+
+    // Step 2: Send the actual promotion request with CSRF token
+    const response = await axios.patch(url, { roleId: newRank }, {
+      headers: {
+        Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+        "X-CSRF-TOKEN": csrfToken,
+        "Content-Type": "application/json"
+      }
+    });
+
+    return response.status === 200;
   } catch (error) {
-    console.error("❌ Promotion failed:", error);
+    console.error("Promotion failed:", error.response?.data || error.message);
     return false;
   }
 }
 
-// Mock function for getting playtime in hours — replace with your real logic
-async function getPlaytimeHours(userId) {
-  // For example, get from your DB or external source
-  return 2.5; // hardcoded test value
+// Send Discord webhook
+async function sendWebhook(userId, rankId, playtime) {
+  const embed = {
+    title: "🔼 User Promoted",
+    color: 0x00ff00,
+    fields: [
+      { name: "User ID", value: userId.toString(), inline: true },
+      { name: "New Rank", value: rankId.toString(), inline: true },
+      { name: "Playtime", value: `${Math.floor(playtime / 60)} minutes`, inline: true }
+    ],
+    timestamp: new Date().toISOString()
+  };
+
+  await axios.post(process.env.DISCORD_WEBHOOK_URL, {
+    embeds: [embed]
+  });
 }
 
-// Endpoint to test promotion (POST with userId in body)
-app.use(express.json());
-app.post("/promote", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).send({ error: "Missing userId in request body" });
-
-  try {
-    const playtime = await getPlaytimeHours(userId);
-    // Get current rank to compare
-    const currentRank = await noblox.getRankInGroup(GROUP_ID, userId);
-
-    let promoted = false;
-    for (const config of rankConfig) {
-      if (playtime >= config.hours && currentRank < config.rank) {
-        promoted = await promoteUser(userId, config.rank);
-        if (promoted) break;
-      }
-    }
-
-    if (promoted) {
-      return res.send({ message: `User ${userId} promoted based on ${playtime}h playtime.` });
-    } else {
-      return res.send({ message: `No promotion needed for user ${userId}.` });
-    }
-  } catch (err) {
-    console.error("❌ Error during promotion process:", err);
-    return res.status(500).send({ error: "Internal server error" });
-  }
-});
-
-// Start server
-app.listen(PORT, async () => {
-  await initRoblox();
-  console.log(`🚀 Server running on port ${PORT}`);
+// Start the server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
